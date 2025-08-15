@@ -11,7 +11,7 @@ Features:
 - Drag-and-drop a MIDI file into the window
 - Browse and load a custom YAML mapping
 - Persist preference to always use the same custom YAML mapping
-- Preview 5 parts (Kick, Snare, Hihat, Ride, Tom) as draggable tiles
+- Preview 6 parts (Kick, Snare, Hihat, Ride, Crash, Tom) as draggable tiles
 - Files are NOT saved automatically; drag a tile to Explorer/Finder to create it
 - Disable a tile if the part would be empty
 - Preserve pitch and velocity of notes
@@ -550,7 +550,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("MIDI Drum Splitter")
-        self.setMinimumSize(780, 640)
+        self.setMinimumSize(780, 700)
         self._mapping_cache: Dict[str, Set[int]] | None = None
 
         # Persistent settings
@@ -765,6 +765,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.output_section = self._create_output_section()
         main_layout.addWidget(self.output_section, 1)
 
+        # Create about section (independent widget)
+        self.about_section = self._create_about_section()
+        main_layout.addWidget(self.about_section, 0)
+
         self.setCentralWidget(central)
 
         # Connect signals
@@ -790,7 +794,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Instructions
         intro = QtWidgets.QLabel(
             "Drag-and-drop ONE MIDI file below (or click the area to browse), optionally pick a custom YAML mapping,\n"
-            "then click Proceed to preview 5 parts you can drag out to Explorer/Finder to save."
+            "then click Proceed to preview 6 parts you can drag out to Explorer/Finder to save."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -882,6 +886,23 @@ class MainWindow(QtWidgets.QMainWindow):
 
         return output_widget
 
+    def _create_about_section(self) -> QtWidgets.QWidget:
+        """Create the independent about section."""
+        about_widget = QtWidgets.QWidget()
+        about_widget.setObjectName("AboutSection")
+        about_widget.setStyleSheet("QWidget#AboutSection { background: rgba(255,255,255,0.02); border-radius: 12px; padding: 8px; }")
+
+        layout = QtWidgets.QVBoxLayout(about_widget)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(6)
+
+        info = QtWidgets.QLabel('<a href="https://x.com/sochan_life" style="color: #bbb; text-decoration: none;">Copyright (c) 2025 Sochan, X(twitter): @sochan_life</a>')
+        info.setStyleSheet("font-size: 14px;")
+        info.setOpenExternalLinks(True)
+        layout.addWidget(info)
+
+        return about_widget
+
     # -------- Preferences --------
     def _load_preferences(self) -> None:
         use_same = self.settings.value('use_custom_config', False, type=bool)
@@ -922,6 +943,11 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as exc:
             self._mapping_cache = None
             QtWidgets.QMessageBox.critical(self, "YAML Error", f"Invalid YAML mapping:\n{exc}")
+            # Clear custom path and uncheck reuse when custom config fails
+            if is_custom:
+                self.yaml_path_edit.setText("")
+                self.chk_use_same.setChecked(False)
+                self._persist_preferences()
             return
 
         dups = find_duplicate_notes(mapping)
@@ -935,6 +961,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     f"The selected YAML contains duplicate notes assigned to multiple parts.\n\n{details}\n\nPlease resolve and try again.",
                 )
                 self._mapping_cache = None
+                # Clear custom path and uncheck reuse when duplicates found
+                self.yaml_path_edit.setText("")
+                self.chk_use_same.setChecked(False)
+                self._persist_preferences()
                 return
             else:
                 # Default mapping itself has duplicates -> terminate app
@@ -1098,23 +1128,20 @@ class PartDragTile(QtWidgets.QFrame):
         self.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
         self.setFrameShadow(QtWidgets.QFrame.Shadow.Raised)
         self.setStyleSheet(
-            "QFrame#PartDragTile { border: 2px dashed #6aa9e9; border-radius: 12px; }"
-            "QFrame#PartDragTile[disabled=\"true\"] { border: 2px dashed #777; }"
+            "QFrame#PartDragTile { border: 2px dashed #6aa9e9; border-radius: 8px; max-width: 120px; }"
+            "QFrame#PartDragTile[disabled=\"true\"] { border: 2px dashed #777; max-width: 120px; }"
         )
 
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
 
         title = QtWidgets.QLabel(self.part_name)
-        f = title.font()
-        f.setBold(True)
-        f.setPointSize(f.pointSize() + 2)
-        title.setFont(f)
+        title.setStyleSheet("font-weight: bold; font-size: 16px;")
         layout.addWidget(title, 0, QtCore.Qt.AlignmentFlag.AlignHCenter)
 
-        self.center_label = QtWidgets.QLabel("Drag out to save")
-        self.center_label.setStyleSheet("font-weight: 800; color: #42A5F5;")
+        self.center_label = QtWidgets.QLabel("Drag\nout\nto\nsave")
+        self.center_label.setStyleSheet("font-weight: 800; color: #42A5F5; font-size: 14px;")
         self.center_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.center_label, 1)
 
