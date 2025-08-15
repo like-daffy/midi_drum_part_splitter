@@ -4,7 +4,7 @@ PyQt6 기반의 GUI 애플리케이션으로, 드럼 MIDI 파일을 노트 매�
 
 ## 주요 기능
 
-- 🎵 **단일 파일 드럼 분리** – MIDI 파일을 드래그 앤 드롭하면 자동으로 파트별 분리
+- 🎵 **단일 파일 드럼 분리 (드래그-아웃 저장)** – MIDI 파일을 드래그 앤 드롭하고 Proceed를 누르면 Kick/Snare/Hihat/Ride/Tom 5개 타일이 나타나며, 비어있지 않은 타일을 탐색기/파인더로 드래그하면 해당 파트의 MIDI 파일이 저장됩니다. 자동 저장은 하지 않습니다.
 - 📝 **사용자 지정 YAML 매핑** – 내 매핑 파일을 불러오거나 내장 Superior Drummer 3 매핑 사용 가능
 - 💾 **설정 기억 기능** – 사용자가 지정한 YAML 설정을 저장
 - 🎯 **Cubase 옥타브 표기** – Cubase 호환 음이름(C-2 ~ B8) 사용
@@ -35,9 +35,10 @@ PyQt6 기반의 GUI 애플리케이션으로, 드럼 MIDI 파일을 노트 매�
 1. 프로그램 창에 MIDI 파일을 **드래그 앤 드롭**
 2. **(선택)** "Browse..." 버튼으로 사용자 지정 YAML 매핑 파일 불러오기
 3. **(선택)** "다음에도 동일한 설정 사용" 체크박스로 설정 저장
-4. **"Proceed" 클릭** → MIDI 파일이 파트별로 분리됨
+4. **"Proceed" 클릭** → 5개 파트 타일이 표시됨 (비어있는 파트는 비활성화)
+5. 원하는 파트 타일을 **탐색기/파인더로 드래그**하여 저장
 
-출력 파일은 원본 파일과 동일한 폴더에 저장되며, 예시는 다음과 같습니다.
+저장은 사용자가 드래그-아웃할 때 수행되며, 파일명 예시는 다음과 같습니다.
 - `your_file-kick.mid`
 - `your_file-snare.mid`
 - `your_file-hihat.mid`
@@ -152,9 +153,10 @@ Inter font
 1. **Drag and drop** a MIDI file into the application window
 2. **(Optional)** Load a custom YAML mapping file using the "Browse..." button
 3. **(Optional)** Check "Next time use the same configuration" to remember your settings
-4. **Click "Proceed"** to split the MIDI file
+4. **Click "Proceed"** to preview 5 part tiles (empty parts are disabled)
+5. **Drag a tile** to Explorer/Finder to save that split MIDI file. Files are not saved automatically.
 
-Output files will be saved in the same folder as the input file with names like:
+Saving occurs when you drag a tile out; filenames look like:
 - `your_file-kick.mid`
 - `your_file-snare.mid`
 - `your_file-hihat.mid`

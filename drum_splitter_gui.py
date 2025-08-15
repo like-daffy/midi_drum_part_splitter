@@ -8,11 +8,12 @@ hard-coded based on the "Organizing notes by markers" output from
 superior_drummer_mapping.mid, using Cubase octave numbering (C-2..B8).
 
 Features:
-- Drag-and-drop MIDI files into the window
+- Drag-and-drop a MIDI file into the window
 - Browse and load a custom YAML mapping
 - Persist preference to always use the same custom YAML mapping
-- Split to files named "{original name} - {part}.mid" in the same folder
-- Skip writing a split file if it would be empty
+- Preview 5 parts (Kick, Snare, Hihat, Ride, Tom) as draggable tiles
+- Files are NOT saved automatically; drag a tile to Explorer/Finder to create it
+- Disable a tile if the part would be empty
 - Preserve pitch and velocity of notes
 
 Packagable with PyInstaller on macOS and Windows.
@@ -23,7 +24,8 @@ from __future__ import annotations
 import os
 import sys
 import traceback
-from typing import Dict, List, Set, Tuple
+import tempfile
+from typing import Dict, List, Set, Tuple, Optional
 
 import mido
 from PyQt6 import QtCore, QtGui, QtWidgets
@@ -377,6 +379,40 @@ def save_split_midis(base_input_path: str, splits: Dict[str, mido.MidiFile]) -> 
 # GUI Components
 # -----------------------------
 
+class OutputPlaceholder(QtWidgets.QWidget):
+    """Placeholder widget shown in output section when no results are available."""
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setMinimumHeight(200)
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+        super().paintEvent(event)
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+
+        rect = self.rect().adjusted(20, 20, -20, -20)
+        pen = QtGui.QPen(QtGui.QColor('#666'))
+        pen.setStyle(QtCore.Qt.PenStyle.DotLine)
+        pen.setWidth(2)
+        painter.setPen(pen)
+        painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(rect, 12, 12)
+
+        # Helper text
+        font = painter.font()
+        font.setPointSize(16)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QtGui.QColor('#666'))
+        painter.drawText(
+            rect,
+            QtCore.Qt.AlignmentFlag.AlignCenter,
+            'Output Result\n\nClick "Proceed" to split MIDI file',
+        )
+        painter.end()
+
+
 class DragDropList(QtWidgets.QListWidget):
     filesChanged = QtCore.pyqtSignal()
 
@@ -384,12 +420,11 @@ class DragDropList(QtWidgets.QListWidget):
         super().__init__(parent)
         self.setAcceptDrops(True)
         self.setAlternatingRowColors(True)
-        # [NEXT VERSION] Enable ExtendedSelection to support multi-file selection
         self.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
-        # Styling is now handled by the global blue sea theme CSS
+        self.allow_click_browse: bool = True
 
     def sizeHint(self) -> QtCore.QSize:
-        return QtCore.QSize(600, 220)
+        return QtCore.QSize(600, 140)
 
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:
         super().paintEvent(event)
@@ -415,7 +450,7 @@ class DragDropList(QtWidgets.QListWidget):
             painter.drawText(
                 rect,
                 QtCore.Qt.AlignmentFlag.AlignCenter,
-                'Drag and drop the drum MIDI file here',
+                'Drag & drop a MIDI file here\n(or click to browse)',
             )
             painter.end()
 
@@ -436,7 +471,6 @@ class DragDropList(QtWidgets.QListWidget):
             event.ignore()
             return
         # Single-file mode: take the first valid MIDI file, replace any existing item
-        # [NEXT VERSION] To support multiple files, remove the clear() call and allow multiple insertions
         for url in event.mimeData().urls():
             local_path = url.toLocalFile()
             if not local_path:
@@ -448,17 +482,41 @@ class DragDropList(QtWidgets.QListWidget):
             self.clear()
             self.addItem(local_path)
             self.filesChanged.emit()
+            self.allow_click_browse = False
             break
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
+        if event.button() == QtCore.Qt.MouseButton.LeftButton and self.allow_click_browse:
+            start_dir = os.path.dirname(self.item(0).text()) if self.count() > 0 else os.getcwd()
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self,
+                "Select MIDI File",
+                start_dir,
+                "MIDI Files (*.mid *.midi)"
+            )
+            if path:
+                self.clear()
+                self.addItem(path)
+                self.filesChanged.emit()
+                self.allow_click_browse = False
+                event.accept()
+                return
+        super().mousePressEvent(event)
 
     def addFiles(self, paths: List[str]) -> None:
         # Single-file mode: take first valid path only
-        # [NEXT VERSION] Accept multiple files; append instead of replacing
         for p in paths:
             if p.lower().endswith(('.mid', '.midi')) and os.path.exists(p):
                 self.clear()
                 self.addItem(p)
                 self.filesChanged.emit()
+                self.allow_click_browse = False
                 break
+
+    def resetToEmpty(self) -> None:
+        self.clear()
+        self.allow_click_browse = True
+        self.filesChanged.emit()
 
     def removeSelected(self) -> None:
         for item in self.selectedItems():
@@ -489,6 +547,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._build_ui()
         self._load_preferences()
         self._load_effective_mapping()
+        self._temp_dir_results: Optional[tempfile.TemporaryDirectory] = None
 
     # -------- Theme Application --------
     def _apply_blue_sea_theme(self) -> None:
@@ -679,35 +738,60 @@ class MainWindow(QtWidgets.QMainWindow):
     # -------- UI Construction --------
     def _build_ui(self) -> None:
         central = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(central)
+        main_layout = QtWidgets.QVBoxLayout(central)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        main_layout.setSpacing(8)
+
+        # Create input section (independent widget)
+        self.input_section = self._create_input_section()
+        main_layout.addWidget(self.input_section, 0)
+
+        # Create output section (independent widget)
+        self.output_section = self._create_output_section()
+        main_layout.addWidget(self.output_section, 1)
+
+        self.setCentralWidget(central)
+
+        # Connect signals
+        self.btn_browse_yaml.clicked.connect(self._on_browse_yaml)
+        self.btn_proceed.clicked.connect(self._on_proceed)
+        self.drop_list.filesChanged.connect(self._on_input_files_changed)
+        self.btn_select_again.clicked.connect(self._on_select_again)
+        self.chk_use_same.toggled.connect(self._on_use_same_toggled)
+        self.yaml_path_edit.textChanged.connect(self._on_yaml_path_changed)
+        self.btn_save_template.clicked.connect(self._on_save_template)
+
+    def _create_input_section(self) -> QtWidgets.QWidget:
+        """Create the independent input section with intro, drag-drop, buttons, and settings."""
+        input_widget = QtWidgets.QWidget()
+        input_widget.setObjectName("InputSection")
+        input_widget.setStyleSheet("QWidget#InputSection { background: rgba(255,255,255,0.02); border-radius: 12px; padding: 8px; }")
+        
+        layout = QtWidgets.QVBoxLayout(input_widget)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
         # Instructions
         intro = QtWidgets.QLabel(
-            "Drag-and-drop MIDI files below, optionally pick a custom YAML mapping,\n"
-            "then click Proceed to split by drum parts."
+            "Drag-and-drop ONE MIDI file below (or click the area to browse), optionally pick a custom YAML mapping,\n"
+            "then click Proceed to preview 5 parts you can drag out to Explorer/Finder to save."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
-        # Drag-and-drop list widget
+        # Drag-and-drop list widget (shorter height)
         self.drop_list = DragDropList()
-        layout.addWidget(self.drop_list, 1)
-
-        # Buttons row: Remove and Clear (hidden in this version)
-        # [NEXT VERSION] Show these buttons to manage multiple files
-        # buttons_row = QtWidgets.QHBoxLayout()
-        # self.btn_remove = QtWidgets.QPushButton("Remove Selected")
-        # self.btn_clear = QtWidgets.QPushButton("Clear")
-        # buttons_row.addWidget(self.btn_remove)
-        # buttons_row.addWidget(self.btn_clear)
-        # buttons_row.addStretch(1)
-        # layout.addLayout(buttons_row)
+        self.drop_list.setMaximumHeight(100)
+        layout.addWidget(self.drop_list, 0)
 
         # Proceed button centered
         proceed_row = QtWidgets.QHBoxLayout()
         proceed_row.addStretch(1)
+        self.btn_select_again = QtWidgets.QPushButton("Select Again")
+        self.btn_select_again.setFixedWidth(160)
+        self.btn_select_again.setEnabled(False)
+        self.btn_select_again.setVisible(False)
+        proceed_row.addWidget(self.btn_select_again)
         self.btn_proceed = QtWidgets.QPushButton("Proceed")
         self.btn_proceed.setDefault(True)
         self.btn_proceed.setFixedWidth(160)
@@ -737,17 +821,48 @@ class MainWindow(QtWidgets.QMainWindow):
         pref_row.addWidget(self.btn_save_template)
         layout.addLayout(pref_row)
 
-        self.setCentralWidget(central)
+        return input_widget
 
-        # Signals
-        self.btn_browse_yaml.clicked.connect(self._on_browse_yaml)
-        self.btn_proceed.clicked.connect(self._on_proceed)
-        # [NEXT VERSION]
-        # self.btn_remove.clicked.connect(self.drop_list.removeSelected)
-        # self.btn_clear.clicked.connect(lambda: (self.drop_list.clear(), self.drop_list.filesChanged.emit()))
-        self.chk_use_same.toggled.connect(self._on_use_same_toggled)
-        self.yaml_path_edit.textChanged.connect(self._on_yaml_path_changed)
-        self.btn_save_template.clicked.connect(self._on_save_template)
+    def _create_output_section(self) -> QtWidgets.QWidget:
+        """Create the independent output section for results."""
+        output_widget = QtWidgets.QWidget()
+        output_widget.setObjectName("OutputSection")
+        output_widget.setStyleSheet("QWidget#OutputSection { background: rgba(255,255,255,0.02); border-radius: 12px; padding: 8px; }")
+        
+        layout = QtWidgets.QVBoxLayout(output_widget)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        # Output placeholder (shows initially)
+        self.output_placeholder = OutputPlaceholder()
+        layout.addWidget(self.output_placeholder, 1)
+
+        # Results area (in-window, hidden initially)
+        self.results_scroll_area = QtWidgets.QScrollArea()
+        self.results_scroll_area.setWidgetResizable(True)
+        self.results_scroll_area.setVisible(False)
+
+        self._results_panel = QtWidgets.QWidget()
+        self._results_panel_layout = QtWidgets.QVBoxLayout(self._results_panel)
+        self._results_panel_layout.setContentsMargins(0, 0, 0, 0)
+        self._results_panel_layout.setSpacing(12)
+
+        self.results_header = QtWidgets.QLabel()
+        self.results_header.setText('<span style="font-size:14px; font-weight:800; color:#ffffff; background-color:#42A5F5; padding:8px 12px; border-radius:10px;">Drag out to save</span>')
+        self.results_header.setWordWrap(False)
+        self.results_header.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
+        self._results_panel_layout.addWidget(self.results_header)
+
+        self.results_row = QtWidgets.QHBoxLayout()
+        self.results_row.setSpacing(12)
+        self._results_row_container = QtWidgets.QWidget()
+        self._results_row_container.setLayout(self.results_row)
+        self._results_panel_layout.addWidget(self._results_row_container)
+
+        self.results_scroll_area.setWidget(self._results_panel)
+        layout.addWidget(self.results_scroll_area, 1)
+
+        return output_widget
 
     # -------- Preferences --------
     def _load_preferences(self) -> None:
@@ -812,7 +927,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_proceed(self) -> None:
         files = self.drop_list.currentFiles()
         if not files:
-            QtWidgets.QMessageBox.information(self, "No Files", "Please drag-and-drop one or more MIDI files to proceed.")
+            QtWidgets.QMessageBox.information(self, "No File", "Please drag-and-drop ONE MIDI file to proceed.")
             return
 
         # Load mapping (custom or default)
@@ -820,29 +935,214 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._mapping_cache:
             return
 
-        mapping = self._mapping_cache
-        failed: List[Tuple[str, str]] = []
-        saved_total: List[str] = []
+        path = files[0]
+        try:
+            splits = split_midi_by_mapping(path, self._mapping_cache)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Split Error", f"Failed to split MIDI file:\n{exc}")
+            return
 
-        # Single-file mode: process only the first file
-        # [NEXT VERSION] Iterate all files to batch process
-        for path in files[:1]:
-            try:
-                splits = split_midi_by_mapping(path, mapping)
-                saved = save_split_midis(path, splits)
-                saved_total.extend(saved)
-            except Exception as exc:
-                failed.append((path, str(exc)))
+        base_name = os.path.splitext(os.path.basename(path))[0]
+        self._populate_results(base_name, splits)
 
-        if saved_total:
-            msg = "Saved files:\n" + "\n".join(saved_total)
-        else:
-            msg = "No split files were created. Either there were no matching notes, or all parts were empty."
+    def _on_input_files_changed(self) -> None:
+        # Clear previous results when input changes
+        self._clear_results()
+        # Show/enable Select Again only when a file is attached
+        has_file = self.drop_list.count() > 0
+        self.btn_select_again.setVisible(has_file)
+        self.btn_select_again.setEnabled(has_file)
 
-        if failed:
-            msg += "\n\nErrors:\n" + "\n".join(f"- {p}: {e}" for p, e in failed)
+    def _clear_results(self) -> None:
+        # Remove existing widgets from results_row
+        while self.results_row.count():
+            item = self.results_row.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        # Cleanup previous temporary directory if any
+        try:
+            if self._temp_dir_results is not None:
+                self._temp_dir_results.cleanup()
+        except Exception:
+            pass
+        self._temp_dir_results = None
+        # Show placeholder, hide results
+        self.output_placeholder.setVisible(True)
+        self.results_scroll_area.setVisible(False)
 
-        QtWidgets.QMessageBox.information(self, "Done", msg)
+    def _on_select_again(self) -> None:
+        # Reset input area to initial state: empty and browse-enabled
+        self.drop_list.resetToEmpty()
+        self.btn_select_again.setVisible(False)
+        self.btn_select_again.setEnabled(False)
+
+    def _populate_results(self, base_name: str, splits: Dict[str, mido.MidiFile]) -> None:
+        # Clear previous
+        self._clear_results()
+
+        # New temp dir for this result set
+        self._temp_dir_results = tempfile.TemporaryDirectory(prefix="drum_split_")
+
+        # Display order of five parts
+        display_order = ["Kick", "Snare", "Hihat", "Ride", "Tom"]
+        for part in display_order:
+            mid = splits.get(part)
+            if mid is None:
+                tile = PartDragTile(part, mido.MidiFile(), base_name, False, self._temp_dir_results, self)
+            else:
+                has_notes = bool(getattr(mid, "_has_notes", False))
+                tile = PartDragTile(part, mid, base_name, has_notes, self._temp_dir_results, self)
+            self.results_row.addWidget(tile, 1)
+
+        # Hide placeholder, show results
+        self.output_placeholder.setVisible(False)
+        self.results_scroll_area.setVisible(True)
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        # Ensure result temp dir is cleaned up on app close
+        try:
+            if self._temp_dir_results is not None:
+                self._temp_dir_results.cleanup()
+        except Exception:
+            pass
+        super().closeEvent(event)
+
+
+class PartDragTile(QtWidgets.QFrame):
+    """A draggable tile representing one split part. Drag this tile to Explorer/Finder to save."""
+
+    def __init__(self, part_name: str, midi_obj: mido.MidiFile, base_name: str,
+                 enabled: bool, temp_dir: tempfile.TemporaryDirectory,
+                 parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.part_name = part_name
+        self.midi_obj = midi_obj
+        self.base_name = base_name
+        self.temp_dir = temp_dir
+        self._temp_path: str | None = None
+
+        self.setObjectName("PartDragTile")
+        self.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+        self.setFrameShadow(QtWidgets.QFrame.Shadow.Raised)
+        self.setStyleSheet(
+            "QFrame#PartDragTile { border: 2px dashed #6aa9e9; border-radius: 12px; }"
+            "QFrame#PartDragTile[disabled=\"true\"] { border: 2px dashed #777; }"
+        )
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        title = QtWidgets.QLabel(self.part_name)
+        f = title.font()
+        f.setBold(True)
+        f.setPointSize(f.pointSize() + 2)
+        title.setFont(f)
+        layout.addWidget(title, 0, QtCore.Qt.AlignmentFlag.AlignHCenter)
+
+        self.center_label = QtWidgets.QLabel("Drag out to save")
+        self.center_label.setStyleSheet("font-weight: 800; color: #42A5F5;")
+        self.center_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.center_label, 1)
+
+        self.setEnabled(enabled)
+        if not enabled:
+            self.center_label.setStyleSheet("")
+            self.center_label.setText("Empty")
+
+    def _ensure_temp_file(self) -> str:
+        if self._temp_path and os.path.exists(self._temp_path):
+            return self._temp_path
+        safe_part = self.part_name.lower()
+        filename = f"{self.base_name}-{safe_part}.mid"
+        out_path = os.path.join(self.temp_dir.name, filename)
+        try:
+            self.midi_obj.save(out_path)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Export Error", f"Failed to create temporary file for {self.part_name}:\n{exc}")
+            raise
+        self._temp_path = out_path
+        return out_path
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
+        if not self.isEnabled():
+            event.ignore()
+            return
+        if event.button() != QtCore.Qt.MouseButton.LeftButton:
+            super().mousePressEvent(event)
+            return
+
+        try:
+            temp_path = self._ensure_temp_file()
+        except Exception:
+            return
+
+        mime = QtCore.QMimeData()
+        mime.setUrls([QtCore.QUrl.fromLocalFile(temp_path)])
+
+        drag = QtGui.QDrag(self)
+        drag.setMimeData(mime)
+        pm = QtGui.QPixmap(180, 44)
+        pm.fill(QtGui.QColor("#1976D2"))
+        painter = QtGui.QPainter(pm)
+        painter.setPen(QtGui.QColor("white"))
+        painter.setFont(QtGui.QFont("Segoe UI", 10, QtGui.QFont.Weight.Bold))
+        painter.drawText(pm.rect(), QtCore.Qt.AlignmentFlag.AlignCenter, f"{self.base_name}-{self.part_name.lower()}.mid")
+        painter.end()
+        drag.setPixmap(pm)
+        drag.exec(QtCore.Qt.DropAction.CopyAction)
+
+
+class ResultsDialog(QtWidgets.QDialog):
+    """Dialog showing 5 horizontal draggable sections for split parts."""
+
+    DISPLAY_ORDER = ["Kick", "Snare", "Hihat", "Ride", "Tom"]
+
+    def __init__(self, parent: QtWidgets.QWidget | None, base_name: str,
+                 splits: Dict[str, mido.MidiFile]) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Split Results — Drag Out to Save")
+        self.setMinimumSize(900, 360)
+        self.base_name = base_name
+        self.splits = splits
+        self._temp_dir = tempfile.TemporaryDirectory(prefix="drum_split_")
+
+        main = QtWidgets.QVBoxLayout(self)
+        main.setContentsMargins(16, 16, 16, 16)
+        main.setSpacing(12)
+
+        header = QtWidgets.QLabel("Drag any non-empty part below onto Explorer/Finder to save it.")
+        header.setWordWrap(True)
+        main.addWidget(header)
+
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(12)
+        main.addLayout(row, 1)
+
+        for part in self.DISPLAY_ORDER:
+            mid = self.splits.get(part)
+            if mid is None:
+                tile = PartDragTile(part, mido.MidiFile(), self.base_name, False, self._temp_dir, self)
+            else:
+                has_notes = bool(getattr(mid, "_has_notes", False))
+                tile = PartDragTile(part, mid, self.base_name, has_notes, self._temp_dir, self)
+            row.addWidget(tile, 1)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.addStretch(1)
+        close_btn = QtWidgets.QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(close_btn)
+        main.addLayout(btn_row)
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        try:
+            self._temp_dir.cleanup()
+        except Exception:
+            pass
+        super().closeEvent(event)
 
 
 def run() -> None:
