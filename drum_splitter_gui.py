@@ -83,12 +83,9 @@ drum_parts:
     - C0
     - C#0
     - D0
-    - D#0
-    - E0
     - F#1
     - G#1
     - A#1
-    - G#2
     - C3
     - C#3
     - D3
@@ -266,6 +263,24 @@ def load_mapping_from_yaml(yaml_text: str) -> Dict[str, Set[int]]:
             midi_notes.add(midi_value)
         result[str(part_name)] = midi_notes
     return result
+
+
+def find_duplicate_notes(mapping: Dict[str, Set[int]]) -> Dict[int, List[str]]:
+    """Return dict of midi_note -> list of part names where duplicates occur (len>1)."""
+    note_to_parts: Dict[int, List[str]] = {}
+    for part_name, note_set in mapping.items():
+        for note in note_set:
+            note_to_parts.setdefault(note, []).append(part_name)
+    return {n: parts for n, parts in note_to_parts.items() if len(parts) > 1}
+
+
+def format_duplicate_notes(dups: Dict[int, List[str]]) -> str:
+    lines: List[str] = []
+    for note_num in sorted(dups.keys()):
+        name = midi_note_to_name(note_num)
+        parts = ", ".join(sorted(dups[note_num]))
+        lines.append(f"{name}: {parts}")
+    return "\n".join(lines)
 
 
 # -----------------------------
@@ -754,6 +769,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Connect signals
         self.btn_browse_yaml.clicked.connect(self._on_browse_yaml)
+        self.btn_use_default_yaml.clicked.connect(self._on_use_default_yaml)
         self.btn_proceed.clicked.connect(self._on_proceed)
         self.drop_list.filesChanged.connect(self._on_input_files_changed)
         self.btn_select_again.clicked.connect(self._on_select_again)
@@ -804,8 +820,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.yaml_path_edit = QtWidgets.QLineEdit()
         self.yaml_path_edit.setPlaceholderText("Custom YAML mapping path (optional)")
         self.btn_browse_yaml = QtWidgets.QPushButton("Browse…")
+        self.btn_use_default_yaml = QtWidgets.QPushButton("Default")
         yaml_row.addWidget(self.yaml_path_edit, 1)
         yaml_row.addWidget(self.btn_browse_yaml)
+        yaml_row.addWidget(self.btn_use_default_yaml)
         layout.addLayout(yaml_row)
 
         # Preference checkbox and export template row
@@ -897,11 +915,39 @@ class MainWindow(QtWidgets.QMainWindow):
         return DEFAULT_MAPPING_YAML
 
     def _load_effective_mapping(self) -> None:
+        is_custom = self.chk_use_same.isChecked() and bool(self.yaml_path_edit.text().strip())
+        yaml_text = self._get_effective_yaml_text()
         try:
-            self._mapping_cache = load_mapping_from_yaml(self._get_effective_yaml_text())
+            mapping = load_mapping_from_yaml(yaml_text)
         except Exception as exc:
             self._mapping_cache = None
             QtWidgets.QMessageBox.critical(self, "YAML Error", f"Invalid YAML mapping:\n{exc}")
+            return
+
+        dups = find_duplicate_notes(mapping)
+        if dups:
+            details = format_duplicate_notes(dups)
+            if is_custom:
+                # Custom YAML has duplicates: alert and block proceeding
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Duplicate Notes in Mapping",
+                    f"The selected YAML contains duplicate notes assigned to multiple parts.\n\n{details}\n\nPlease resolve and try again.",
+                )
+                self._mapping_cache = None
+                return
+            else:
+                # Default mapping itself has duplicates -> terminate app
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "Default Mapping Error",
+                    f"Default YAML contains duplicate notes (developer fix required):\n\n{details}",
+                )
+                QtCore.QTimer.singleShot(0, QtWidgets.QApplication.instance().quit)
+                self._mapping_cache = None
+                return
+
+        self._mapping_cache = mapping
 
     def _on_browse_yaml(self) -> None:
         start_dir = os.path.dirname(self.yaml_path_edit.text().strip()) if self.yaml_path_edit.text().strip() else os.getcwd()
@@ -912,10 +958,29 @@ class MainWindow(QtWidgets.QMainWindow):
             self._persist_preferences()
             self._load_effective_mapping()
 
+    def _on_use_default_yaml(self) -> None:
+        # Clear custom path, uncheck reuse, and use default mapping immediately
+        self.yaml_path_edit.setText("")
+        self.chk_use_same.setChecked(False)
+        self._persist_preferences()
+        self._load_effective_mapping()
+
     def _on_save_template(self) -> None:
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Default Mapping Template", os.getcwd(), "YAML Files (*.yml *.yaml)")
+        default_path = os.path.join(os.getcwd(), "default.yaml")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save Default Mapping Template",
+            default_path,
+            "YAML Files (*.yaml);;All Files (*)"
+        )
         if not path:
+            # User canceled; do nothing
             return
+        # Ensure filename has .yaml or .yml extension
+        base, ext = os.path.splitext(path)
+        # Always force .yaml for UX consistency
+        if ext.lower() != ".yaml":
+            path = base + ".yaml"
         try:
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(DEFAULT_MAPPING_YAML)
@@ -985,8 +1050,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # New temp dir for this result set
         self._temp_dir_results = tempfile.TemporaryDirectory(prefix="drum_split_")
 
-        # Display order of five parts
-        display_order = ["Kick", "Snare", "Hihat", "Ride", "Tom"]
+        # Display order of six parts (Crash inserted between Ride and Tom)
+        display_order = ["Kick", "Snare", "Hihat", "Ride", "Crash", "Tom"]
         for part in display_order:
             mid = splits.get(part)
             if mid is None:
@@ -1005,6 +1070,12 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             if self._temp_dir_results is not None:
                 self._temp_dir_results.cleanup()
+        except Exception:
+            pass
+        # If user opted not to reuse the same configuration, clear saved YAML path
+        try:
+            if not self.chk_use_same.isChecked():
+                self.settings.setValue('custom_config_path', '')
         except Exception:
             pass
         super().closeEvent(event)
@@ -1096,9 +1167,9 @@ class PartDragTile(QtWidgets.QFrame):
 
 
 class ResultsDialog(QtWidgets.QDialog):
-    """Dialog showing 5 horizontal draggable sections for split parts."""
+    """Dialog showing draggable sections for split parts."""
 
-    DISPLAY_ORDER = ["Kick", "Snare", "Hihat", "Ride", "Tom"]
+    DISPLAY_ORDER = ["Kick", "Snare", "Hihat", "Ride", "Crash", "Tom"]
 
     def __init__(self, parent: QtWidgets.QWidget | None, base_name: str,
                  splits: Dict[str, mido.MidiFile]) -> None:
