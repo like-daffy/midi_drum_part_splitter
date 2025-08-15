@@ -54,7 +54,7 @@ PyQt6 기반의 GUI 애플리케이션으로, 드럼 MIDI 파일을 노트 매�
 - **Crash**: D#0, E0, G0, G#0, C#2 ~ E7 (넓은 크래시 심벌 범위)  
 - **Tom**: F1, G1, A1, B1, C2, C4, C#4, D4, D#4, F4, F#4, G4, G#4, A4, A#4  
 
-## 사용자 지정 YAML 설정
+## 커스텀텀 YAML 설정
 
 YAML 형식으로 직접 드럼 매핑을 작성할 수 있습니다.
 
@@ -107,7 +107,7 @@ midi-drum-splitter/
 
 MIT License – 자세한 내용은 LICENSE 파일 참조
 
-## 감사의 말
+## 참고사항
 
 - GUI 프레임워크로 PyQt6 사용
 - MIDI 파일 처리를 위해 mido 사용
@@ -225,14 +225,6 @@ midi-drum-splitter/
 ## License
 
 MIT License - see LICENSE file for details
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
 
 ## Acknowledgments
 
