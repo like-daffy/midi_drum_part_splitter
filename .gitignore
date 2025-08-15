@@ -201,3 +201,6 @@ build/
 *.spec
 DrumSplitter-*.zip
 DrumSplitter-*.sha256.txt
+venv-arm64/*
+venv-x86_64/*
+MIDI_Drum_Splitter-macos-*.zip
